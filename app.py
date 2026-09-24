@@ -227,6 +227,7 @@ else:
     with st.container(border=True):
         st.subheader("📋 Perfil do Investidor / Projeto")
         
+        
         c_i1, c_i2, c_i3 = st.columns(3)
         with c_i1:
             tipo_projeto = st.selectbox(
@@ -277,6 +278,28 @@ else:
             k2.metric("Preço Proposto", f"R$ {preco_oferta_mwh:.2f} / MWh")
             k3.metric("Economia Mensal Estimada", f"R$ {economia_mensal:,.2f}".replace(",", "."))
             k4.metric("Economia Anual (ROI)", f"R$ {economia_anual:,.2f}".replace(",", "."), delta=f"-{fator_desconto}% vs Baseline")
+
+# 💡 Oportunidade de Match Encontrada
+            st.markdown("---")
+            st.subheader("💡 Oportunidade de Match Encontrada")
+
+            # 🆕 DESTAQUE BILATERAL (Foco no Gerador para a Banca)
+            receita_gerador_anual = custo_match_mensal * 12
+            
+            c_inv, c_ger = st.columns(2)
+            with c_inv:
+                st.info(f"🏢 **Vantagem para o Investidor (Offtaker):**\n\nEconomia Anual projetada de **R$ {economia_anual:,.2f}** frente ao mercado tradicional.")
+            with c_ger:
+                st.success(f"🌬️ **Vantagem para a Usina (Gerador):**\n\nNova Receita Anual de **R$ {receita_gerador_anual:,.2f}** destravada de uma energia que seria desperdiçada (Curtailment).")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # KPIs Técnicos
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Demanda Mensal", f"{demanda_mensal_mwh:,.0f} MWh".replace(",", "."))
+            k2.metric("Preço Acordado", f"R$ {preco_oferta_mwh:.2f} / MWh")
+            k3.metric("Ticket Mensal da Usina", f"R$ {custo_match_mensal:,.2f}".replace(",", "."))
+            k4.metric("Economia Mensal (Comprador)", f"R$ {economia_mensal:,.2f}".replace(",", "."))
 
             # 🆕 NOVO RECURSO 1: ANÁLISE DE SENSIBILIDADE
             st.markdown("<br>", unsafe_allow_html=True)
