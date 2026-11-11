@@ -238,21 +238,21 @@ def renderizar_sidebar_header():
 
 
 def renderizar_seletor_modulo() -> str:
-    """Renderiza seletor de módulo na sidebar usando tabs."""
+    """Renderiza seletor de módulo na sidebar usando radio."""
     st.sidebar.subheader("📊 Módulos de Análise")
 
-    modulos = [
-        ("📈 Visão Geral", "visao_geral"),
-        ("🚫 Restrições & Curtailment", "restricoes"),
-        ("🗺️ Mapa Geográfico", "mapa"),
-        ("🤝 Matchmaker Investimentos", "matchmaker"),
-    ]
+    modulos = {
+        "visao_geral": "📈 Visão Geral",
+        "restricoes": "🚫 Restrições & Curtailment",
+        "mapa": "🗺️ Mapa Geográfico",
+        "matchmaker": "🤝 Matchmaker Investimentos",
+    }
 
     # Usar radio estilizado
     escolha = st.sidebar.radio(
         "Selecione o módulo:",
-        options=[m[1] for m in modulos],
-        format_func=lambda x: dict(modulos)[x],
+        options=list(modulos.keys()),
+        format_func=lambda x: modulos[x],
         label_visibility="collapsed"
     )
 
