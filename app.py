@@ -1,358 +1,747 @@
+"""
+ReEnergia - Marketplace de Energia Renovável Restrita
+
+Dashboard interativo para análise de curtailment (restrição de geração)
+e matchmaking entre geradores com excedente e consumidores de alta demanda.
+
+Desenvolvido para o Hackathon ProEnergia.
+"""
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-# Configuração da Página
-st.set_page_config(
-    page_title="Analytics & Matchmaker | ONS & CCEE",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
+# Importar módulos locais
+from data_loader import (
+    carregar_dados_processados,
+    obter_subsistemas_disponiveis,
+    filtrar_por_subsistema,
+    preparar_dados_mapa,
+    obter_periodo_dados,
+)
+from calculations import (
+    PerfilInvestidor,
+    processar_match,
+    formatar_brl,
+    formatar_numero_br,
+    calcular_kpis_geracao,
+    calcular_kpis_restricao,
+    preparar_dados_exportacao,
+    calcular_horas_mes,
+    FATOR_EMISSAO_CO2_TON_POR_MWH,
+)
+from ui_components import (
+    configurar_pagina,
+    renderizar_sidebar_header,
+    renderizar_seletor_modulo,
+    renderizar_filtro_subsistema,
+    renderizar_section_header,
+    criar_grafico_linha_temporal,
+    criar_grafico_barras_horizontal,
+    criar_grafico_area,
+    criar_grafico_barras_agrupadas,
+    criar_grafico_mapa,
+    renderizar_tabela_formatada,
+    renderizar_info_card,
+    renderizar_empty_state,
 )
 
-# Estilização CSS personalizada
-st.markdown("""
-    <style>
-        .metric-card {
-            background-color: #0e1117;
-            border: 1px solid #262730;
-            padding: 15px;
-            border-radius: 8px;
-            text-align: center;
-        }
-        .stMetric {
-            background-color: #161b22;
-            padding: 12px;
-            border-radius: 8px;
-            border: 1px solid #30363d;
-        }
-    </style>
-""", unsafe_allow_html=True)
 
-# Carregamento de Dados Otimizado (Cache)
-@st.cache_data
-def load_data():
-    df_ger = pd.read_parquet("data/dash_geracao_diaria.parquet")
-    df_rest = pd.read_parquet("data/dash_restricao_diaria.parquet")
-    
-    # Garantir datetime
-    df_ger['data'] = pd.to_datetime(df_ger['data'])
-    df_rest['data'] = pd.to_datetime(df_rest['data'])
-    
-    return df_ger, df_rest
+# ============================================================
+# CONFIGURAÇÃO DA PÁGINA
+# ============================================================
+configurar_pagina()
 
-try:
-    df_geracao, df_restricao = load_data()
-except Exception as e:
-    st.error(f"Erro ao carregar os arquivos Parquet de `data/`. Verifique se o Sprint 2 foi executado. Detalhes: {e}")
+
+# ============================================================
+# CARREGAMENTO DE DADOS (COM CACHE E TRATAMENTO DE ERRO)
+# ============================================================
+@st.cache_data(show_spinner="Inicializando ReEnergia...")
+def inicializar_dados():
+    """Carrega e prepara todos os dados necessários."""
+    try:
+        df_ger, df_rest = carregar_dados_processados()
+        subsistemas = obter_subsistemas_disponiveis(df_ger, df_rest)
+        periodo_info = obter_periodo_dados(df_ger, df_rest)
+        return df_ger, df_rest, subsistemas, periodo_info, None
+    except FileNotFoundError as e:
+        return None, None, [], {}, str(e)
+    except Exception as e:
+        return None, None, [], {}, f"Erro inesperado ao carregar dados: {e}"
+
+
+df_geracao, df_restricao, subsistemas_disponiveis, periodo_info, erro_carregamento = inicializar_dados()
+
+if erro_carregamento:
+    st.error(f"❌ {erro_carregamento}")
+    st.info("💡 Execute `python prepare_dashboard.py` para gerar os arquivos Parquet necessários.")
     st.stop()
 
-# Lista global de subsistemas
-subsistemas_disponiveis = sorted(list(
-    set(df_geracao['nom_subsistema'].dropna()).union(set(df_restricao['nom_subsistema'].dropna()))
-))
 
-# ==================== SIDEBAR / FILTROS ====================
-st.sidebar.title("⚡ Painel de Controle")
-st.sidebar.subheader("Filtros Globais")
+# ============================================================
+# SIDEBAR
+# ============================================================
+renderizar_sidebar_header()
 
-# Seleção de Visão
-visao_selecionada = st.sidebar.radio(
-    "Selecione o Módulo de Análise:",
-    [
-        "📊 Visão Geral de Geração (2023)",
-        "🚫 Análise de Restrições & Losses (2026)",
-        "🗺️ Mapeamento Geográfico",
-        "🤝 Matchmaker de Investimentos"
-    ]
-)
+# Seletor de módulo
+modulo_selecionado = renderizar_seletor_modulo()
 
-# Filtro de Subsistema (para visões de dados)
+# Filtro de subsistema (aplicável a visões de dados)
+st.sidebar.subheader("🔍 Filtros Globais")
 subsistema_filtro = st.sidebar.multiselect(
-    "Subsistema / Submercado:", 
-    subsistemas_disponiveis, 
-    default=subsistemas_disponiveis
+    "Subsistema / Submercado:",
+    options=subsistemas_disponiveis,
+    default=subsistemas_disponiveis,
+    help="Filtre os dados por subsistema elétrico brasileiro",
+    key="filtro_subsistema_global"
 )
 
-# Aplicar Filtro de Subsistema
-df_ger_filtered = df_geracao[df_geracao['nom_subsistema'].isin(subsistema_filtro)] if subsistema_filtro else df_geracao
-df_rest_filtered = df_restricao[df_restricao['nom_subsistema'].isin(subsistema_filtro)] if subsistema_filtro else df_restricao
+# Aplicar filtro
+df_ger_filtrado, df_rest_filtrado = filtrar_por_subsistema(
+    df_geracao, df_restricao, subsistema_filtro
+)
+
+# Info do período na sidebar
+st.sidebar.markdown("---")
+with st.sidebar.expander("📅 Período dos Dados", expanded=False):
+    st.caption(f"**Geração (ONS 2023):** {periodo_info['geracao_inicio'].strftime('%d/%m/%Y')} a {periodo_info['geracao_fim'].strftime('%d/%m/%Y')}")
+    st.caption(f"**Restrição (ONS 2026):** {periodo_info['restricao_inicio'].strftime('%d/%m/%Y')} a {periodo_info['restricao_fim'].strftime('%d/%m/%Y')}")
+    st.caption(f"Usinas geração: {periodo_info['n_usinas_geracao']} | Usinas restrição: {periodo_info['n_usinas_restricao']}")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Hackathon Energy Analytics v1.0")
+st.sidebar.caption("ReEnergia v2.0 — Hackathon ProEnergia")
 
 
-# ==================== VISÃO 1: GERAÇÃO (2023) ====================
-if visao_selecionada == "📊 Visão Geral de Geração (2023)":
-    st.title("📊 Monitoramento de Geração Verificada (ONS)")
-    st.caption("Análise consolidada por dia e subsistema ao longo de 2023")
+# ============================================================
+# ROTEAMENTO DE MÓDULOS
+# ============================================================
 
-    # KPIs
-    tot_mwh = df_ger_filtered['mwh_gerado'].sum()
-    usinas_ativas = df_ger_filtered['nom_usina'].nunique()
-    media_diaria = df_ger_filtered.groupby('data')['mwh_gerado'].sum().mean()
+# ----------------------------------------------------------
+# MÓDULO 1: VISÃO GERAL DE GERAÇÃO (2023)
+# ----------------------------------------------------------
+if modulo_selecionado == "visao_geral":
+    st.title("📈 Visão Geral de Geração Verificada")
+    st.caption("Análise consolidada da geração por dia e subsistema — Dados ONS 2023")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Geração Total (MWh)", f"{tot_mwh:,.2f}".replace(",", "."))
-    col2.metric("Média Diária Gerada (MWh)", f"{media_diaria:,.2f}".replace(",", "."))
-    col3.metric("Usinas Monitoradas", usinas_ativas)
-
-    st.markdown("---")
-
-    # Gráfico 1: Evolução da Geração Diária por Subsistema
-    st.subheader("Evolução Temporal da Geração (MWh)")
-    df_trend = df_ger_filtered.groupby(['data', 'nom_subsistema'])['mwh_gerado'].sum().reset_index()
-    
-    fig_gen = px.line(
-        df_trend,
-        x='data',
-        y='mwh_gerado',
-        color='nom_subsistema',
-        labels={'mwh_gerado': 'Geração (MWh)', 'data': 'Data', 'nom_subsistema': 'Subsistema'},
-        title="Geração Total Diária por Subsistema (2023)",
-        template="plotly_dark"
-    )
-    fig_gen.update_layout(hovermode="x unified")
-    st.plotly_chart(fig_gen, use_container_width=True)
-
-    # Gráfico 2: Top 10 Usinas
-    st.subheader("Top 10 Usinas por Volume Gerado")
-    top_usinas = df_ger_filtered.groupby('nom_usina')['mwh_gerado'].sum().nlargest(10).reset_index()
-    fig_top = px.bar(
-        top_usinas,
-        x='mwh_gerado',
-        y='nom_usina',
-        orientation='h',
-        labels={'mwh_gerado': 'Geração (MWh)', 'nom_usina': 'Usina'},
-        color='mwh_gerado',
-        color_continuous_scale='Viridis',
-        template="plotly_dark"
-    )
-    fig_top.update_layout(yaxis={'categoryorder':'total ascending'})
-    st.plotly_chart(fig_top, use_container_width=True)
-
-
-# ==================== VISÃO 2: RESTRIÇÕES & CUSTOS ====================
-elif visao_selecionada == "🚫 Análise de Restrições & Losses (2026)":
-    st.title("🚫 Restrições Operacionais & Impacto Financeiro (Constrained-off)")
-    st.caption("Análise de corte de geração e cruzamento com PLD CCEE")
-
-    # KPIs
-    tot_mwh_restrito = df_rest_filtered['mwh_restrito'].sum()
-    custo_total = df_rest_filtered['custo_restricao_rs'].sum()
-    pld_medio = df_rest_filtered['pld_medio'].mean()
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Energia Restrita (MWh)", f"{tot_mwh_restrito:,.2f}".replace(",", "."))
-    c2.metric("Custo Estimado da Restrição (R$)", f"R$ {custo_total:,.2f}".replace(",", "."))
-    c3.metric("PLD Médio Registrado (R$/MWh)", f"R$ {pld_medio:.2f}")
-
-    st.markdown("---")
-
-    col_g1, col_g2 = st.columns(2)
-
-    with col_g1:
-        st.subheader("Geração Verificada vs Restrição Diária")
-        df_rest_daily = df_rest_filtered.groupby('data')[['mwh_verificado', 'mwh_restrito']].sum().reset_index()
-        fig_comp = go.Figure()
-        fig_comp.add_trace(go.Bar(x=df_rest_daily['data'], y=df_rest_daily['mwh_verificado'], name='Verificado (MWh)', marker_color='#2ca02c'))
-        fig_comp.add_trace(go.Bar(x=df_rest_daily['data'], y=df_rest_daily['mwh_restrito'], name='Restrito (MWh)', marker_color='#d62728'))
-        fig_comp.update_layout(barmode='stack', template="plotly_dark", title="Volume Restrito x Verificado")
-        st.plotly_chart(fig_comp, use_container_width=True)
-
-    with col_g2:
-        st.subheader("Custo Diário das Restrições (R$)")
-        df_cost_daily = df_rest_filtered.groupby('data')['custo_restricao_rs'].sum().reset_index()
-        fig_cost = px.area(
-            df_cost_daily,
-            x='data',
-            y='custo_restricao_rs',
-            labels={'custo_restricao_rs': 'Custo (R$)', 'data': 'Data'},
-            title="Impacto Financeiro Diário (Constrained-off)",
-            template="plotly_dark",
-            color_discrete_sequence=['#ff7f0e']
+    if df_ger_filtrado.empty:
+        renderizar_empty_state(
+            "📊",
+            "Nenhum dado de geração",
+            "Selecione ao menos um subsistema no filtro lateral."
         )
-        st.plotly_chart(fig_cost, use_container_width=True)
-
-    # Tabela detalhada
-    st.subheader("Detalhamento por Usina e Motivo")
-    st.dataframe(
-        df_rest_filtered[['data', 'nom_subsistema', 'nom_usina', 'mwh_verificado', 'mwh_restrito', 'custo_restricao_rs', 'pld_medio']]
-        .sort_values(by='custo_restricao_rs', ascending=False)
-        .style.format({
-            'mwh_verificado': '{:,.2f}',
-            'mwh_restrito': '{:,.2f}',
-            'custo_restricao_rs': 'R$ {:,.2f}',
-            'pld_medio': 'R$ {:,.2f}'
-        }),
-        use_container_width=True
-    )
-
-
-# ==================== VISÃO 3: MAPA GEOGRÁFICO ====================
-elif visao_selecionada == "🗺️ Mapeamento Geográfico":
-    st.title("🗺️ Localização e Distribuição Geográfica")
-    st.caption("Geolocalização dos ativos monitorados e com restrições registradas")
-
-    df_map = df_rest_filtered.dropna(subset=['latitude', 'longitude'])
-
-    if len(df_map) == 0:
-        st.warning("Nenhuma usina no filtro selecionado possui coordenadas geográficas válidas cadastradas no ANEEL SIGA.")
     else:
-        fig_map = px.scatter_map(
-            df_map,
-            lat="latitude",
-            lon="longitude",
-            hover_name="nom_usina",
-            hover_data=["nom_subsistema", "mwh_restrito", "custo_restricao_rs"],
-            size="mwh_restrito",
-            color="custo_restricao_rs",
-            color_continuous_scale=px.colors.cyclical.IceFire,
-            size_max=30,
-            zoom=3,
-            map_style="carto-darkmatter",
-            title="Usinas com Restrição (Tamanho = MWh Restrito | Cor = Custo R$)"
-        )
-        fig_map.update_layout(margin={"r":0,"t":40,"l":0,"b":0})
-        st.plotly_chart(fig_map, use_container_width=True)
+        # KPIs
+        kpis = calcular_kpis_geracao(df_ger_filtrado)
 
-
-# ==================== VISÃO 4: MATCHMAKER DE INVESTIMENTOS ====================
-else:
-    st.title("🤝 Matchmaker de Energia: Investidor x Gerador")
-    st.caption("Conecte sua demanda industrial/datacenter a excedentes de geração com desconto em relação ao mercado tradicional.")
-
-    # 1. FORMULÁRIO DO INVESTIDOR
-    with st.container(border=True):
-        st.subheader("📋 Perfil do Investidor / Projeto")
-        
-        
-        c_i1, c_i2, c_i3 = st.columns(3)
-        with c_i1:
-            tipo_projeto = st.selectbox(
-                "Tipo de Empreendimento:",
-                ["Data Center / AI Cluster", "Planta de Hidrogênio Verde", "Indústria Eletrointensiva", "Outro"]
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric(
+                "Geração Total",
+                formatar_numero_br(kpis['total_mwh'], 0) + " MWh",
+                help="Soma de toda geração verificada no período filtrado"
             )
-            regiao_pref = st.selectbox("Subsistema Preferencial:", subsistemas_disponiveis, index=0)
-            
-        with c_i2:
-            carga_mw = st.number_input("Carga Necessária (MW):", min_value=1.0, max_value=500.0, value=35.0, step=5.0)
-            turno = st.selectbox("Perfil de Operação / Turno:", ["24/7 (Ininterrupto)", "Noturno (18h às 06h)", "Diurno (06h às 18h)"])
-            
-        with c_i3:
-            tarifa_baseline = st.number_input("Tarifa Baseline Atual (R$/MWh):", min_value=100.0, max_value=800.0, value=380.0, help="Preço de referência do mercado livre tradicional ou cativo")
-            fator_desconto = st.slider("Desconto Alvo no Excedente (%):", min_value=10, max_value=60, value=30)
+        with col2:
+            st.metric(
+                "Média Diária",
+                formatar_numero_br(kpis['media_diaria_mwh'], 0) + " MWh",
+                help="Média da geração diária total no período"
+            )
+        with col3:
+            st.metric(
+                "Usinas Monitoradas",
+                formatar_numero_br(kpis['n_usinas'], 0),
+                help="Número de usinas únicas com dados no período"
+            )
+        with col4:
+            st.metric(
+                "Pico Máximo",
+                formatar_numero_br(kpis['geracao_max_mw'], 0) + " MW",
+                help="Maior geração horária registrada (MW médio na hora)"
+            )
 
-        btn_buscar = st.button("🔍 Processar Match e Calcular Economia", use_container_width=True, type="primary")
+        st.markdown("---")
 
-    # 2. LÓGICA DE MATCHING E CÁLCULO DE ECONOMIA
-    if btn_buscar:
-        horas_mes = 720 if "24/7" in turno else 360
-        demanda_mensal_mwh = carga_mw * horas_mes
-        
-        df_match = df_restricao[df_restricao['nom_subsistema'] == regiao_pref].copy()
-        
-        if df_match.empty:
-            st.warning(f"Não foram encontradas restrições registradas no subsistema {regiao_pref} no período analisado.")
+        # Gráfico 1: Evolução temporal
+        renderizar_section_header("📅", "Evolução Temporal da Geração Diária")
+
+        df_trend = df_ger_filtrado.groupby(['data', 'nom_subsistema'])['mwh_gerado'].sum().reset_index()
+
+        fig_gen = criar_grafico_linha_temporal(
+            df_trend,
+            x='data',
+            y='mwh_gerado',
+            color='nom_subsistema',
+            titulo="Geração Total Diária por Subsistema (2023)",
+            labels={'mwh_gerado': 'Geração (MWh)', 'data': 'Data', 'nom_subsistema': 'Subsistema'}
+        )
+        st.plotly_chart(fig_gen, use_container_width=True)
+
+        # Gráfico 2: Top 10 Usinas
+        renderizar_section_header("🏭", "Top 10 Usinas por Volume Gerado")
+
+        top_usinas = (
+            df_ger_filtrado.groupby('nom_usina')['mwh_gerado']
+            .sum()
+            .nlargest(10)
+            .reset_index()
+        )
+
+        fig_top = criar_grafico_barras_horizontal(
+            top_usinas,
+            x='mwh_gerado',
+            y='nom_usina',
+            titulo="Top 10 Usinas — Geração Total Acumulada (2023)",
+            labels={'mwh_gerado': 'Geração (MWh)', 'nom_usina': 'Usina'},
+            color='mwh_gerado'
+        )
+        st.plotly_chart(fig_top, use_container_width=True)
+
+        # Gráfico 3: Distribuição por tipo de geração
+        renderizar_section_header("⚡", "Geração por Tipo de Fonte")
+
+        if 'tipo_geracao' in df_ger_filtrado.columns and df_ger_filtrado['tipo_geracao'].notna().any():
+            df_tipo = (
+                df_ger_filtrado.groupby('tipo_geracao')['mwh_gerado']
+                .sum()
+                .reset_index()
+                .sort_values('mwh_gerado', ascending=False)
+            )
+
+            fig_tipo = px.pie(
+                df_tipo,
+                values='mwh_gerado',
+                names='tipo_geracao',
+                title="Participação por Tipo de Geração",
+                template="plotly_dark",
+                hole=0.4
+            )
+            fig_tipo.update_traces(textposition='inside', textinfo='percent+label')
+            fig_tipo.update_layout(showlegend=True)
+            st.plotly_chart(fig_tipo, use_container_width=True)
         else:
-            usinas_oferta = df_match.groupby(['nom_usina']).agg(
-                mwh_disponivel=('mwh_restrito', 'sum'),
-                pld_medio=('pld_medio', 'mean')
-            ).reset_index()
+            st.info("Dados de tipo de geração não disponíveis para o filtro selecionado.")
 
-            preco_oferta_mwh = tarifa_baseline * (1 - (fator_desconto / 100))
-            
-            custo_baseline_mensal = demanda_mensal_mwh * tarifa_baseline
-            custo_match_mensal = demanda_mensal_mwh * preco_oferta_mwh
-            economia_mensal = custo_baseline_mensal - custo_match_mensal
-            economia_anual = economia_mensal * 12
-            co2_evitado = (demanda_mensal_mwh * 12) * 0.04
 
-            st.markdown("---")
-            st.subheader("💡 Oportunidade de Match Encontrada")
+# ----------------------------------------------------------
+# MÓDULO 2: ANÁLISE DE RESTRIÇÕES & CURTAILMENT (2026)
+# ----------------------------------------------------------
+elif modulo_selecionado == "restricoes":
+    st.title("🚫 Análise de Restrições Operacionais & Curtailment")
+    st.caption("Cruzamento financeiro entre MWh cortados (constrained-off) e PLD — Dados ONS/CCEE 2026")
 
-            # KPIs principais
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Demanda Mensal", f"{demanda_mensal_mwh:,.0f} MWh".replace(",", "."))
-            k2.metric("Preço Proposto", f"R$ {preco_oferta_mwh:.2f} / MWh")
-            k3.metric("Economia Mensal Estimada", f"R$ {economia_mensal:,.2f}".replace(",", "."))
-            k4.metric("Economia Anual (ROI)", f"R$ {economia_anual:,.2f}".replace(",", "."), delta=f"-{fator_desconto}% vs Baseline")
+    if df_rest_filtrado.empty:
+        renderizar_empty_state(
+            "🚫",
+            "Nenhum dado de restrição",
+            "Selecione ao menos um subsistema no filtro lateral."
+        )
+    else:
+        # KPIs
+        kpis = calcular_kpis_restricao(df_rest_filtrado)
 
-# 💡 Oportunidade de Match Encontrada
-            st.markdown("---")
-            st.subheader("💡 Oportunidade de Match Encontrada")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric(
+                "Energia Restrita Total",
+                formatar_numero_br(kpis['total_mwh_restrito'], 0) + " MWh",
+                help="Soma de toda energia cortada por restrição de transmissão"
+            )
+        with col2:
+            st.metric(
+                "Custo Estimado Total",
+                formatar_brl(kpis['custo_total_rs']),
+                help="Custo de oportunidade: MWh restrito × PLD horário"
+            )
+        with col3:
+            st.metric(
+                "PLD Médio",
+                formatar_brl(kpis['pld_medio']) + " /MWh",
+                help="Preço de Liquidação das Diferenças médio ponderado"
+            )
+        with col4:
+            st.metric(
+                "% Médio de Restrição",
+                f"{kpis['pct_medio_restricao']:.1f}%",
+                help="Média de (Restrito / Potencial) × 100 por usina/dia"
+            )
 
-            # 🆕 DESTAQUE BILATERAL (Foco no Gerador para a Banca)
-            receita_gerador_anual = custo_match_mensal * 12
-            
-            c_inv, c_ger = st.columns(2)
-            with c_inv:
-                st.info(f"🏢 **Vantagem para o Investidor (Offtaker):**\n\nEconomia Anual projetada de **R$ {economia_anual:,.2f}** frente ao mercado tradicional.")
-            with c_ger:
-                st.success(f"🌬️ **Vantagem para a Usina (Gerador):**\n\nNova Receita Anual de **R$ {receita_gerador_anual:,.2f}** destravada de uma energia que seria desperdiçada (Curtailment).")
+        st.markdown("---")
 
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            # KPIs Técnicos
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Demanda Mensal", f"{demanda_mensal_mwh:,.0f} MWh".replace(",", "."))
-            k2.metric("Preço Acordado", f"R$ {preco_oferta_mwh:.2f} / MWh")
-            k3.metric("Ticket Mensal da Usina", f"R$ {custo_match_mensal:,.2f}".replace(",", "."))
-            k4.metric("Economia Mensal (Comprador)", f"R$ {economia_mensal:,.2f}".replace(",", "."))
+        # Layout em duas colunas
+        col_g1, col_g2 = st.columns(2)
 
-            # 🆕 NOVO RECURSO 1: ANÁLISE DE SENSIBILIDADE
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.subheader("📈 Análise de Sensibilidade (Estresse de Cenários)")
-            c_ot, c_ba, c_es = st.columns(3)
-            c_ot.metric("Cenário Agressivo (+20% Volatilidade)", f"R$ {economia_anual * 1.2:,.2f}".replace(",", "."), delta="+20% Economia")
-            c_ba.metric("Cenário Base (Projetado)", f"R$ {economia_anual:,.2f}".replace(",", "."))
-            c_es.metric("Cenário Conservador (-20% Volatilidade)", f"R$ {economia_anual * 0.8:,.2f}".replace(",", "."), delta="-20% Economia")
+        with col_g1:
+            renderizar_section_header("📊", "Geração Verificada vs Restrição Diária")
 
-            # Comparativo Visual
-            st.markdown("<br>", unsafe_allow_html=True)
-            fig_comp = go.Figure(data=[
-                go.Bar(name='Custo Baseline (Tradicional)', x=['Gasto Mensal (R$)'], y=[custo_baseline_mensal], marker_color='#ef553b'),
-                go.Bar(name='Custo via Excedente (Matchmaker)', x=['Gasto Mensal (R$)'], y=[custo_match_mensal], marker_color='#00cc96')
-            ])
-            fig_comp.update_layout(barmode='group', template="plotly_dark", title="Comparativo do Custo de Suprimento Energético Mensal")
+            df_rest_daily = (
+                df_rest_filtrado.groupby('data')[['mwh_verificado', 'mwh_restrito']]
+                .sum()
+                .reset_index()
+            )
+
+            fig_comp = go.Figure()
+            fig_comp.add_trace(go.Bar(
+                x=df_rest_daily['data'],
+                y=df_rest_daily['mwh_verificado'],
+                name='Verificado (MWh)',
+                marker_color='#2ca02c',
+                hovertemplate='Data: %{x}<br>Verificado: %{y:,.2f} MWh<extra></extra>'
+            ))
+            fig_comp.add_trace(go.Bar(
+                x=df_rest_daily['data'],
+                y=df_rest_daily['mwh_restrito'],
+                name='Restrito (MWh)',
+                marker_color='#d62728',
+                hovertemplate='Data: %{x}<br>Restrito: %{y:,.2f} MWh<extra></extra>'
+            ))
+            fig_comp.update_layout(
+                barmode='stack',
+                template="plotly_dark",
+                title="Volume Restrito x Verificado Diário",
+                hovermode="x unified",
+                margin=dict(l=40, r=20, t=60, b=40),
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            fig_comp.update_xaxes(showgrid=False, zeroline=False)
+            fig_comp.update_yaxes(
+                showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.1)', zeroline=False
+            )
             st.plotly_chart(fig_comp, use_container_width=True)
 
-            # Usinas Compatíveis
-            st.subheader("⚡ Geradores Candidatos com Excedente Operacional")
-            
-            usinas_oferta['atendimento_demanda_%'] = (usinas_oferta['mwh_disponivel'] / demanda_mensal_mwh) * 100
-            usinas_oferta['atendimento_demanda_%'] = usinas_oferta['atendimento_demanda_%'].clip(upper=100)
-            
-            st.dataframe(
-                usinas_oferta[['nom_usina', 'mwh_disponivel', 'pld_medio', 'atendimento_demanda_%']]
-                .sort_values(by='mwh_disponivel', ascending=False)
-                .head(10)
-                .style.format({
-                    'mwh_disponivel': '{:,.2f} MWh',
-                    'pld_medio': 'R$ {:,.2f}',
-                    'atendimento_demanda_%': '{:.1f}% da carga'
-                }),
-                use_container_width=True
+        with col_g2:
+            renderizar_section_header("💰", "Custo Diário das Restrições")
+
+            df_cost_daily = (
+                df_rest_filtrado.groupby('data')['custo_restricao_rs']
+                .sum()
+                .reset_index()
             )
-            
-            st.info(f"🌱 **Impacto ESG Estimado:** Utilizando a energia renovável restrita deste match, seu empreendimento evita a emissão de **{co2_evitado:,.1f} toneladas de CO₂** por ano.")
 
-            # 🆕 NOVO RECURSO 2: BOTÃO DE EXPORTAÇÃO CSV
-            st.markdown("---")
-            st.subheader("📄 Exportar Term Sheet Comercial")
-            
-            df_export = usinas_oferta[['nom_usina', 'mwh_disponivel', 'pld_medio', 'atendimento_demanda_%']].copy()
-            df_export['tarifa_proposta_mwh'] = preco_oferta_mwh
-            df_export['economia_mensal_estimada'] = economia_mensal
-            
-            csv_data = df_export.to_csv(index=False).encode('utf-8')
+            fig_cost = criar_grafico_area(
+                df_cost_daily,
+                x='data',
+                y='custo_restricao_rs',
+                titulo="Impacto Financeiro Diário (Constrained-off)",
+                labels={'custo_restricao_rs': 'Custo (R$)', 'data': 'Data'},
+                cor='#ff7f0e'
+            )
+            st.plotly_chart(fig_cost, use_container_width=True)
 
-            st.download_button(
-                label="📥 Baixar Relatório de Match & Viabilidade (CSV)",
-                data=csv_data,
-                file_name=f"relatorio_match_{tipo_projeto.replace(' ', '_')}_{regiao_pref}.csv",
-                mime="text/csv",
+        # Gráfico 3: % Restrição por usina
+        renderizar_section_header("📈", "Percentual de Restrição por Usina")
+
+        df_pct = (
+            df_rest_filtrado.groupby('nom_usina')[['mwh_restrito', 'mwh_potencial']]
+            .sum()
+            .reset_index()
+        )
+        df_pct['pct_restricao'] = (df_pct['mwh_restrito'] / df_pct['mwh_potencial'] * 100).round(1)
+        df_pct = df_pct.sort_values('pct_restricao', ascending=True).tail(15)
+
+        fig_pct = criar_grafico_barras_horizontal(
+            df_pct,
+            x='pct_restricao',
+            y='nom_usina',
+            titulo="Top 15 Usinas — Maior % de Restrição",
+            labels={'pct_restricao': '% Restrição', 'nom_usina': 'Usina'},
+            color='pct_restricao',
+            color_scale='Reds'
+        )
+        st.plotly_chart(fig_pct, use_container_width=True)
+
+        # Tabela detalhada
+        renderizar_section_header("📋", "Detalhamento por Usina e Dia")
+
+        colunas_tabela = {
+            'mwh_verificado': 'numero',
+            'mwh_restrito': 'numero',
+            'custo_restricao_rs': 'brl',
+            'pld_medio': 'brl',
+            'pct_restricao': 'pct',
+        }
+
+        df_tabela = df_rest_filtrado[[
+            'data', 'nom_subsistema', 'nom_usina',
+            'mwh_verificado', 'mwh_restrito',
+            'custo_restricao_rs', 'pld_medio', 'pct_restricao'
+        ]].sort_values('custo_restricao_rs', ascending=False)
+
+        renderizar_tabela_formatada(df_tabela, colunas_tabela, altura=450)
+
+
+# ----------------------------------------------------------
+# MÓDULO 3: MAPA GEOGRÁFICO
+# ----------------------------------------------------------
+elif modulo_selecionado == "mapa":
+    st.title("🗺️ Mapeamento Geográfico das Restrições")
+    st.caption("Geolocalização interativa das usinas com restrição operacional registrada")
+
+    df_mapa = preparar_dados_mapa(df_rest_filtrado)
+
+    if df_mapa.empty:
+        renderizar_empty_state(
+            "📍",
+            "Nenhuma usina com coordenadas válidas",
+            "As usinas no filtro selecionado não possuem latitude/longitude cadastradas no ANEEL SIGA."
+        )
+    else:
+        # Métricas do mapa
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Usinas no Mapa", len(df_mapa))
+        with col2:
+            st.metric("MWh Restrito Total", formatar_numero_br(df_mapa['mwh_restrito'].sum(), 0) + " MWh")
+        with col3:
+            st.metric("Custo Total", formatar_brl(df_mapa['custo_restricao_rs'].sum()))
+
+        st.markdown("---")
+
+        # Mapa
+        fig_map = criar_grafico_mapa(
+            df_mapa,
+            titulo="Usinas com Restrição (Tamanho = MWh Restrito | Cor = Custo R$)"
+        )
+        st.plotly_chart(fig_map, use_container_width=True)
+
+        # Tabela resumo
+        renderizar_section_header("📋", "Usinas Geolocalizadas")
+
+        df_mapa_resumo = df_mapa.groupby('nom_usina').agg({
+            'nom_subsistema': 'first',
+            'latitude': 'first',
+            'longitude': 'first',
+            'mwh_restrito': 'sum',
+            'custo_restricao_rs': 'sum',
+            'tipo_geracao': 'first',
+            'potencia_kw': 'first',
+        }).reset_index().sort_values('custo_restricao_rs', ascending=False)
+
+        colunas_mapa = {
+            'mwh_restrito': 'mwh',
+            'custo_restricao_rs': 'brl',
+            'potencia_kw': 'numero',
+        }
+
+        renderizar_tabela_formatada(
+            df_mapa_resumo[['nom_usina', 'nom_subsistema', 'tipo_geracao',
+                           'potencia_kw', 'mwh_restrito', 'custo_restricao_rs',
+                           'latitude', 'longitude']],
+            colunas_mapa,
+            altura=400
+        )
+
+
+# ----------------------------------------------------------
+# MÓDULO 4: MATCHMAKER DE INVESTIMENTOS
+# ----------------------------------------------------------
+else:  # matchmaker
+    st.title("🤝 Matchmaker: Investidor × Gerador")
+    st.caption(
+        "Conecte sua demanda industrial (Data Centers, H₂ Verde, Indústria Eletrointensiva) "
+        "a excedentes de geração renovável com desconto sobre o mercado tradicional."
+    )
+
+    # Verificar se há dados de restrição
+    if df_rest_filtrado.empty:
+        renderizar_empty_state(
+            "🤝",
+            "Dados insuficientes para Matchmaker",
+            "Não há dados de restrição disponíveis para o subsistema selecionado. "
+            "Ajuste o filtro na barra lateral."
+        )
+    else:
+        # ------------------------------------------------------
+        # FORMULÁRIO DO INVESTIDOR
+        # ------------------------------------------------------
+        with st.container(border=True):
+            renderizar_section_header("📋", "Perfil do Investidor / Projeto")
+
+            c_i1, c_i2, c_i3 = st.columns(3)
+
+            with c_i1:
+                tipo_projeto = st.selectbox(
+                    "Tipo de Empreendimento:",
+                    ["Data Center / AI Cluster", "Planta de Hidrogênio Verde",
+                     "Indústria Eletrointensiva", "Outro"],
+                    help="Perfil de consumo influencia na análise de compatibilidade"
+                )
+                regiao_pref = st.selectbox(
+                    "Subsistema Preferencial:",
+                    subsistemas_disponiveis,
+                    index=0 if subsistemas_disponiveis else 0,
+                    help="Região onde o empreendimento será instalado"
+                )
+
+            with c_i2:
+                carga_mw = st.number_input(
+                    "Carga Necessária (MW):",
+                    min_value=1.0,
+                    max_value=500.0,
+                    value=35.0,
+                    step=5.0,
+                    help="Potência média demandada pelo empreendimento"
+                )
+                perfil_operacao = st.selectbox(
+                    "Perfil de Operação / Turno:",
+                    ["24/7 (Ininterrupto)", "Noturno (18h às 06h)", "Diurno (06h às 18h)"],
+                    help="Define as horas mensais de consumo para cálculo de MWh"
+                )
+
+            with c_i3:
+                tarifa_baseline = st.number_input(
+                    "Tarifa Baseline Atual (R$/MWh):",
+                    min_value=100.0,
+                    max_value=800.0,
+                    value=380.0,
+                    step=10.0,
+                    help="Preço de referência do mercado livre tradicional ou cativo"
+                )
+                desconto_alvo = st.slider(
+                    "Desconto Alvo no Excedente (%):",
+                    min_value=10,
+                    max_value=60,
+                    value=30,
+                    help="Percentual de desconto sobre a tarifa baseline"
+                )
+
+            btn_processar = st.button(
+                "🔍 Processar Match e Calcular Economia",
                 use_container_width=True,
                 type="primary"
             )
+
+        # ------------------------------------------------------
+        # PROCESSAMENTO DO MATCH
+        # ------------------------------------------------------
+        if btn_processar:
+            with st.spinner("Processando match e calculando viabilidade..."):
+                perfil = PerfilInvestidor(
+                    tipo_projeto=tipo_projeto,
+                    subsistema_preferido=regiao_pref,
+                    carga_mw=carga_mw,
+                    perfil_operacao=perfil_operacao,
+                    tarifa_baseline=tarifa_baseline,
+                    desconto_alvo_pct=desconto_alvo
+                )
+
+                resultado = processar_match(df_restricao, perfil)
+
+            if resultado is None:
+                st.warning(
+                    f"⚠️ Não foram encontradas restrições registradas no subsistema "
+                    f"**{regiao_pref}** no período analisado, ou nenhuma usina possui "
+                    f"excedente (restrição > 0) disponível."
+                )
+            else:
+                st.success("✅ Match processado com sucesso!")
+                st.markdown("---")
+
+                # --------------------------------------------------
+                # DESTAQUE BILATERAL (Investidor + Gerador)
+                # --------------------------------------------------
+                renderizar_section_header("💡", "Oportunidade de Match Encontrada")
+
+                c_inv, c_ger = st.columns(2)
+
+                with c_inv:
+                    renderizar_info_card(
+                        "🏢 Vantagem para o Investidor (Offtaker)",
+                        f"Economia Anual projetada de **{formatar_brl(resultado.economia_anual)}** "
+                        f"frente ao mercado tradicional ({desconto_alvo}% de desconto). "
+                        f"Demanda mensal: **{formatar_numero_br(resultado.demanda_mensal_mwh, 0)} MWh** "
+                        f"a **{formatar_brl(resultado.preco_oferta_mwh)}/MWh**.",
+                        tipo="success"
+                    )
+
+                with c_ger:
+                    renderizar_info_card(
+                        "🌬️ Vantagem para a Usina (Gerador)",
+                        f"Nova Receita Anual de **{formatar_brl(resultado.receita_gerador_anual)}** "
+                        f"destrava energia que seria desperdiçada (Curtailment). "
+                        f"Ticket mensal médio: **{formatar_brl(resultado.custo_match_mensal)}**.",
+                        tipo="info"
+                    )
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # --------------------------------------------------
+                # KPIs TÉCNICOS
+                # --------------------------------------------------
+                renderizar_section_header("📊", "Indicadores Principais")
+
+                k1, k2, k3, k4 = st.columns(4)
+
+                with k1:
+                    st.metric(
+                        "Demanda Mensal",
+                        formatar_numero_br(resultado.demanda_mensal_mwh, 0) + " MWh",
+                        help=f"Carga {carga_mw} MW × {calcular_horas_mes(perfil_operacao)}h/mês"
+                    )
+
+                with k2:
+                    st.metric(
+                        "Preço Acordado",
+                        formatar_brl(resultado.preco_oferta_mwh) + " /MWh",
+                        delta=f"-{desconto_alvo}% vs Baseline",
+                        delta_color="inverse"
+                    )
+
+                with k3:
+                    st.metric(
+                        "Ticket Mensal da Usina",
+                        formatar_brl(resultado.custo_match_mensal),
+                        help="Receita mensal estimada para o gerador"
+                    )
+
+                with k4:
+                    st.metric(
+                        "Economia Mensal (Comprador)",
+                        formatar_brl(resultado.economia_mensal),
+                        delta=f"{formatar_brl(resultado.economia_anual)}/ano",
+                        delta_color="normal"
+                    )
+
+                # --------------------------------------------------
+                # ANÁLISE DE SENSIBILIDADE
+                # --------------------------------------------------
+                st.markdown("<br>", unsafe_allow_html=True)
+                renderizar_section_header("📈", "Análise de Sensibilidade (Estresse de Cenários)")
+
+                c_ot, c_ba, c_es = st.columns(3)
+
+                with c_ot:
+                    st.metric(
+                        "Cenário Agressivo",
+                        formatar_brl(resultado.cenario_agressivo),
+                        delta="+20% vs Base",
+                        delta_color="normal"
+                    )
+                    st.caption("Volatilidade favorável (+20%)")
+
+                with c_ba:
+                    st.metric(
+                        "Cenário Base",
+                        formatar_brl(resultado.cenario_base),
+                        delta="Projetado",
+                        delta_color="off"
+                    )
+                    st.caption("Cenário projetado padrão")
+
+                with c_es:
+                    st.metric(
+                        "Cenário Conservador",
+                        formatar_brl(resultado.cenario_conservador),
+                        delta="-20% vs Base",
+                        delta_color="inverse"
+                    )
+                    st.caption("Volatilidade adversa (-20%)")
+
+                # --------------------------------------------------
+                # COMPARATIVO VISUAL DE CUSTOS
+                # --------------------------------------------------
+                st.markdown("<br>", unsafe_allow_html=True)
+                renderizar_section_header("💰", "Comparativo do Custo de Suprimento Energético")
+
+                fig_comp = criar_grafico_barras_agrupadas(
+                    categorias=['Custo Mensal (R$)'],
+                    valores_a=[resultado.custo_baseline_mensal],
+                    valores_b=[resultado.custo_match_mensal],
+                    nome_a='Custo Baseline (Mercado Tradicional)',
+                    nome_b='Custo via Excedente (Matchmaker)',
+                    titulo="Custo Mensal: Mercado Tradicional vs Matchmaker",
+                    cor_a='#EF553B',
+                    cor_b='#00CC96'
+                )
+                st.plotly_chart(fig_comp, use_container_width=True)
+
+                # --------------------------------------------------
+                # GERADORES CANDIDATOS
+                # --------------------------------------------------
+                st.markdown("<br>", unsafe_allow_html=True)
+                renderizar_section_header("⚡", "Geradores Candidatos com Excedente Operacional")
+
+                colunas_usinas = {
+                    'mwh_disponivel': 'mwh',
+                    'pld_medio': 'brl',
+                    'atendimento_demanda_pct': 'pct',
+                }
+
+                df_usinas_display = resultado.usinas_oferta[[
+                    'nom_usina', 'mwh_disponivel', 'pld_medio',
+                    'atendimento_demanda_pct', 'horas_com_restricao',
+                    'custo_total_restricao'
+                ]].head(10).copy()
+
+                df_usinas_display = df_usinas_display.rename(columns={
+                    'mwh_disponivel': 'MWh Disponível (Mês)',
+                    'pld_medio': 'PLD Médio (R$/MWh)',
+                    'atendimento_demanda_pct': '% Atendimento Carga',
+                    'horas_com_restricao': 'Horas c/ Restrição',
+                    'custo_total_restricao': 'Custo Restrição Total (R$)'
+                })
+
+                renderizar_tabela_formatada(
+                    df_usinas_display,
+                    {
+                        'MWh Disponível (Mês)': 'mwh',
+                        'PLD Médio (R$/MWh)': 'brl',
+                        '% Atendimento Carga': 'pct',
+                        'Custo Restrição Total (R$)': 'brl',
+                    },
+                    altura=350
+                )
+
+                # --------------------------------------------------
+                # IMPACTO ESG
+                # --------------------------------------------------
+                st.markdown("<br>", unsafe_allow_html=True)
+                renderizar_info_card(
+                    "🌱 Impacto ESG Estimado",
+                    f"Utilizando a energia renovável restrita deste match, seu empreendimento "
+                    f"evita a emissão de **{formatar_numero_br(resultado.co2_evitado_ton_ano, 1)} "
+                    f"toneladas de CO₂** por ano. "
+                    f"(Fator de emissão: {FATOR_EMISSAO_CO2_TON_POR_MWH} tCO₂/MWh — média brasileira)",
+                    tipo="success"
+                )
+
+                # --------------------------------------------------
+                # EXPORTAÇÃO TERM SHEET
+                # --------------------------------------------------
+                st.markdown("---")
+                renderizar_section_header("📄", "Exportar Term Sheet Comercial")
+
+                df_export = preparar_dados_exportacao(resultado, perfil)
+
+                csv_data = df_export.to_csv(index=False, sep=';').encode('utf-8')
+
+                st.download_button(
+                    label="📥 Baixar Relatório de Match & Viabilidade (CSV)",
+                    data=csv_data,
+                    file_name=(
+                        f"termsheet_reenergia_"
+                        f"{tipo_projeto.replace(' ', '_').replace('/', '-')}_"
+                        f"{regiao_pref}.csv"
+                    ),
+                    mime="text/csv",
+                    use_container_width=True,
+                    type="primary",
+                    help="Arquivo CSV com detalhes do match, usinas candidatas e projeções financeiras"
+                )
+
+                with st.expander("👁️ Visualizar dados do Term Sheet", expanded=False):
+                    st.dataframe(df_export, use_container_width=True, hide_index=True)
+
+
+# ============================================================
+# RODAPÉ
+# ============================================================
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #8B949E; font-size: 0.85rem; padding: 1rem;">
+    ⚡ <strong>ReEnergia</strong> — Transformando curtailment em oportunidade<br>
+    Hackathon ProEnergia | Dados: ONS, CCEE, ANEEL SIGA
+</div>
+""", unsafe_allow_html=True)
